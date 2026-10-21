@@ -400,26 +400,57 @@ create or replace function public.close_round() returns integer
 language plpgsql security definer set search_path=public as $$
 declare r public.round_state%rowtype; e public.news_events%rowtype;
         v_open numeric(18,2); v_current numeric(18,2); v_target numeric(18,2);
-        v_effect numeric; v_label text;
+        v_effect numeric; v_label text; v_total integer; v_distinct integer;
+        v_positive integer; v_negative integer;
 begin
  if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
  select * into r from public.round_state where id=1 for update;
  if r.status<>'active' then raise exception 'No active round to close'; end if;
+
+ -- Round 0 is the initial inventory sale. Later rounds need five headlines
+ -- for five different stocks, with exactly one positive and one negative event.
  if r.round_number between 1 and 4 then
-   for e in select * from public.news_events where round_number=r.round_number and published=true and resolved=false order by share_symbol for update
+   select count(*),count(distinct share_symbol),
+          count(*) filter(where hidden_type='definitely_positive'),
+          count(*) filter(where hidden_type='definitely_negative')
+   into v_total,v_distinct,v_positive,v_negative
+   from public.news_events
+   where round_number=r.round_number and published=true;
+   if v_total<>5 or v_distinct<>5 or v_positive<>1 or v_negative<>1 then
+     raise exception 'Cannot close round: publish five headlines for five different stocks, with exactly one definitely positive and one definitely negative event.';
+   end if;
+
+   for e in select * from public.news_events
+     where round_number=r.round_number and published=true and resolved=false
+     order by share_symbol for update
    loop
-     select opening_price into v_open from public.round_price_snapshots where round_number=r.round_number and share_symbol=e.share_symbol;
+     select opening_price into v_open from public.round_price_snapshots
+       where round_number=r.round_number and share_symbol=e.share_symbol;
      select price into v_current from public.shares where symbol=e.share_symbol for update;
+     if v_current is null then raise exception 'News references missing share %',e.share_symbol; end if;
      if v_open is null then v_open:=v_current; end if;
-     v_effect:=greatest(-6.0,least(6.0,e.impact_pct*0.75));
-     v_target:=round(v_current*(1+v_effect/100.0),2);
-     v_target:=greatest(round(v_open*0.92,2),least(round(v_open*1.08,2),v_target));
-     update public.shares set previous_price=price,price=v_target,updated_at=now() where symbol=e.share_symbol;
-     if e.hidden_type='definitely_positive' then v_label:='Positive outcome · dampened price adjustment';
-     elsif e.hidden_type='definitely_negative' then v_label:='Negative outcome · dampened price adjustment';
-     elsif e.hidden_type='somewhat_positive' then v_label:='Somewhat positive outcome · no direct news adjustment';
-     else v_label:='Somewhat negative outcome · no direct news adjustment'; end if;
+
+     -- Only the definite-positive and definite-negative stocks get direct news impact.
+     -- Apply the full configured effect to the live pre-close price, capped at +/-8%
+     -- for the news adjustment itself. Other three stocks remain trading-driven only.
+     if e.hidden_type='definitely_positive' or e.hidden_type='definitely_negative' then
+       v_effect:=greatest(-8.0,least(8.0,e.impact_pct));
+       v_target:=round(v_current*(1+v_effect/100.0),2);
+       update public.shares set previous_price=price,price=v_target,updated_at=now()
+       where symbol=e.share_symbol;
+       if e.hidden_type='definitely_positive' then
+         v_label:='Positive news · full news impact applied at round close';
+       else
+         v_label:='Negative news · full news impact applied at round close';
+       end if;
+     elsif e.hidden_type='somewhat_positive' then
+       v_label:='Somewhat positive news · trading only, no direct news adjustment';
+     else
+       v_label:='Somewhat negative news · trading only, no direct news adjustment';
+     end if;
+
      update public.news_events set resolved=true where id=e.id;
+     update public.public_news set resolved=true,outcome_label=v_label where id=e.public_news_id;
      update public.public_news set resolved=true,outcome_label=v_label
        where round_number=e.round_number and share_symbol=e.share_symbol and headline=e.headline;
    end loop;
@@ -558,6 +589,10 @@ end $$;
 revoke all on function public.admin_complete_reset() from public, anon;
 grant execute on function public.admin_complete_reset() to authenticated;
 
+
+-- Round 2 correction: keep only one definite-negative event; ONGC is neutral to news.
+update public.news_events set hidden_type='somewhat_negative',impact_pct=0
+where round_number=2 and share_symbol='ONGC';
 
 -- ===== Ledger reconciliation and exact reset baselines (2026-10) =====
 alter table public.teams add column if not exists starting_cash numeric(18,2);
