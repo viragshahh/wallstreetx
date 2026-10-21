@@ -64,6 +64,58 @@ button.red{background:#381b20;color:#ffb8be;border-color:#70363e;box-shadow:none
 @media(max-width:900px){.app{padding:13px}.tabs{width:100%;overflow-x:auto;flex-wrap:nowrap}.tabs button{white-space:nowrap;padding:9px 12px}.value{font-size:22px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{transition:none!important;scroll-behavior:auto!important}}
 
+
+/* Stronger finance-terminal treatment: keep every existing section, field and tab */
+:root{--bg:#070a0c;--panel:#101518;--panel2:#171f22;--line:#2b373b;--txt:#f2f6f4;--muted:#98a8a4;--green:#5be58d;--red:#ff5f69;--blue:#84b9ff;--gold:#e7c35b}
+body{background:#080c0e;color:var(--txt)}
+.app{max-width:1660px;padding:24px}
+.top{padding:12px 0 22px;border-bottom:1px solid #263136}
+.logo{width:48px;height:48px;border-radius:9px;background:#5be58d;color:#06140b;box-shadow:none;font-size:20px}
+.brand h1{font-size:20px;letter-spacing:.14em}
+.brand p{font-size:10px;color:#8fa19a;letter-spacing:.19em}
+.status{background:#102018;border-color:#2e6842;color:#9af0b2;padding:8px 12px}
+.tabs{width:100%;margin:18px 0 22px;padding:5px;gap:5px;background:#0e1417;border:1px solid #263238;border-radius:9px}
+.tabs button{flex:0 0 auto;background:transparent;color:#9aaba7;border:1px solid transparent;border-radius:6px;padding:11px 18px}
+.tabs button.active{background:#183d27;color:#a2f5b7;border-color:#39794c;box-shadow:inset 0 -2px #5be58d}
+.hero{margin:24px 0 20px;padding-bottom:14px;border-bottom:1px solid #202b2f}
+.hero h2{font-size:clamp(28px,4vw,39px);font-weight:760;letter-spacing:-.045em}
+.eyebrow{color:#5be58d}
+.stats{gap:13px}
+.stat{background:#11181b;border:1px solid #2b373b;border-radius:8px;padding:19px;box-shadow:none}
+.stat:before{top:0;bottom:auto;left:0;width:100%;height:2px;background:#3cbd6a;border-radius:0}
+.value{font-size:28px;line-height:1.2;margin-top:10px}
+.sub{font-size:11px}
+.layout{gap:18px}
+.panel{background:#101619;border:1px solid #2a363a;border-radius:8px;box-shadow:none}
+.head{background:#151d20;border-bottom:1px solid #2b373b;padding:16px 18px}
+.head h3{font-size:14px;font-weight:750}
+.head small{font-size:11px}
+.body{padding:18px}
+th{background:#182124;color:#a4b3ae;padding:13px 15px}
+td{padding:14px 15px;border-bottom:1px solid #222d31}
+tbody tr:hover{background:#17211c}
+.field input,.field select,.field textarea,.search{background:#090f11;border:1px solid #354348;border-radius:6px;padding:11px 12px}
+.field label{color:#a5b4af}
+button{border-radius:6px;background:#5be58d;color:#07150b;box-shadow:none}
+button.secondary{background:#1b2529;color:#e2eae6;border-color:#3a484d}
+button.red{background:#351b1e;color:#ffb8bd;border-color:#70363b}
+.news-ticker{background:#131e19;border:1px solid #34523d;border-radius:7px}
+.news{border-bottom:1px solid #263237}
+.news h4{font-size:13px;font-weight:650}
+.tag{background:#173b24;color:#a0f1b5;border:1px solid #2b6240;border-radius:4px}
+.tag.wait{background:#202a2e;color:#c1ccc8;border-color:#3b484c}
+.teamrow{border-bottom:1px solid #263237;padding:13px 8px}
+.rank{background:#202a2e;border:1px solid #39464a;border-radius:5px}
+.teamname{font-size:13px}
+.worth{font-size:13px}
+.notice{background:#141d20;border-color:#344348}
+.notice.success{background:#11261a;border-color:#2e7044}
+.notice.error{background:#2b171a;border-color:#75343a}
+.modalbox{background:#11191c;border-color:#354247}
+.pill{background:#141e21;border-color:#39484c}
+.footer{border-top:1px solid #202b2f;margin-top:18px}
+@media(max-width:900px){.app{padding:12px}.top{padding-bottom:15px}.tabs{overflow-x:auto}.tabs button{padding:10px 13px}.value{font-size:23px}.body{padding:13px}}
+
 </style></head><body>
 <div class="app">
 <header class="top"><div class="brand"><div class="logo">W×</div><div><h1>WALL STREET X</h1><p>SHARED EVENT MARKET · FIVE ROUND SIMULATION</p></div></div><div class="toolbar"><span class="status" id="connection"><span class="dot"></span>Connecting…</span><button class="secondary" id="loginBtn" onclick="openLogin()">Admin sign in</button><button class="secondary hidden" id="logoutBtn" onclick="logout()">Sign out</button></div></header>
