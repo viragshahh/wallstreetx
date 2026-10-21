@@ -215,3 +215,127 @@ do $$ begin alter publication supabase_realtime add table public.teams; exceptio
 do $$ begin alter publication supabase_realtime add table public.transactions; exception when duplicate_object then null; when undefined_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table public.public_news; exception when duplicate_object then null; when undefined_object then null; end $$;
 do $$ begin alter publication supabase_realtime add table public.round_state; exception when duplicate_object then null; when undefined_object then null; end $$;
+
+
+-- ===== Simplified event setup (also applied to the live project) =====
+-- Reset the unstarted demo seed to the real event universe.
+delete from public.public_news;
+delete from public.news_events;
+delete from public.transactions;
+delete from public.teams where name <> 'Organizer Inventory';
+delete from public.shares;
+
+alter table public.round_state drop constraint if exists round_state_round_number_check;
+alter table public.round_state alter column round_number set default 0;
+alter table public.round_state add constraint round_state_round_number_check check (round_number between 0 and 3);
+alter table public.transactions drop constraint if exists transactions_round_number_check;
+alter table public.transactions add constraint transactions_round_number_check check (round_number between 0 and 3);
+alter table public.news_events drop constraint if exists news_events_round_number_check;
+alter table public.news_events add constraint news_events_round_number_check check (round_number between 1 and 3);
+alter table public.news_events drop constraint if exists news_events_round_number_hidden_type_key;
+alter table public.news_events drop constraint if exists news_events_hidden_type_impact_pct_check;
+
+insert into public.shares(symbol,name,price,previous_price,volume) values
+ ('RELIANCE','Reliance Industries',1400,1400,0),('TATAMOTORS','Tata Motors',700,700,0),
+ ('AIRTEL','Bharti Airtel',1200,1200,0),('HDFCBANK','HDFC Bank',1700,1700,0),('ONGC','ONGC',250,250,0);
+
+insert into public.teams(name,cash,holdings,archived) values
+ ('Organizer Inventory',0,'{"RELIANCE":1000000,"TATAMOTORS":1000000,"AIRTEL":1000000,"HDFCBANK":1000000,"ONGC":1000000}'::jsonb,false),
+ ('Team 1',1000000,'{}'::jsonb,false),('Team 2',1000000,'{}'::jsonb,false),
+ ('Team 3',1000000,'{}'::jsonb,false),('Team 4',1000000,'{}'::jsonb,false),
+ ('Team 5',1000000,'{}'::jsonb,false),('Team 6',1000000,'{}'::jsonb,false),
+ ('Team 7',1000000,'{}'::jsonb,false),('Team 8',1000000,'{}'::jsonb,false),
+ ('Team 9',1000000,'{}'::jsonb,false),('Team 10',1000000,'{}'::jsonb,false)
+on conflict(name) do update set cash=excluded.cash,holdings=excluded.holdings,archived=false;
+
+insert into public.news_events(round_number,share_symbol,headline,body,hidden_type,impact_pct) values
+(1,'RELIANCE','Reliance Industries signals stronger-than-expected retail and digital momentum.','Investor attention turns to the outlook for consumer businesses and digital services.','definitely_positive',8),
+(1,'TATAMOTORS','Tata Motors faces fresh questions about near-term demand in a key overseas market.','Dealers are watching order trends and the company’s response to changing demand.','definitely_negative',-8),
+(1,'AIRTEL','Bharti Airtel expands its 5G coverage in several high-traffic urban clusters.','The expansion may support customer experience while requiring continued network investment.','somewhat_positive',0),
+(1,'HDFCBANK','HDFC Bank reports steady deposit growth as competition for savings intensifies.','The market is assessing the balance between deposit mobilisation and margins.','somewhat_negative',0),
+(1,'ONGC','ONGC reviews its near-term capital spending plan amid changing crude-price expectations.','Management has not announced a change to its longer-term production priorities.','somewhat_positive',0),
+(2,'RELIANCE','Reliance announces a delay in a major project milestone as costs are reassessed.','The revised schedule could shift the timing of expected project benefits.','definitely_negative',-8),
+(2,'TATAMOTORS','Tata Motors receives encouraging bookings for a newly refreshed vehicle range.','Dealers report stronger customer enquiries ahead of the next delivery cycle.','definitely_positive',8),
+(2,'AIRTEL','Bharti Airtel sees stable subscriber additions while industry pricing remains competitive.','Analysts are watching average revenue per user and network spending.','somewhat_positive',0),
+(2,'HDFCBANK','HDFC Bank increases provisions as it takes a cautious view of selected loan segments.','The move is described as prudent risk management, with no broad stress signal disclosed.','somewhat_negative',0),
+(2,'ONGC','ONGC reports an operational interruption at one production facility.','The company is assessing the duration and expected production impact.','definitely_negative',-8),
+(3,'RELIANCE','Reliance reports progress on a strategic partnership supporting its new-energy plans.','The next phase depends on execution milestones and commercial ramp-up.','somewhat_positive',0),
+(3,'TATAMOTORS','Tata Motors outlines a stronger cost-control plan following a margin review.','Investors are assessing whether the plan can offset input-cost pressures.','somewhat_positive',0),
+(3,'AIRTEL','Bharti Airtel announces a broad network investment programme to accelerate coverage.','The spending is intended to improve capacity but may weigh on near-term cash flow.','definitely_negative',-8),
+(3,'HDFCBANK','HDFC Bank reports improved operating efficiency and resilient asset quality.','The update supports confidence in execution and the quality of the loan book.','definitely_positive',8),
+(3,'ONGC','ONGC benefits from a favourable production update at a key asset.','The update improves the near-term operating outlook, subject to commodity-price volatility.','somewhat_positive',0);
+
+update public.round_state set round_number=0,status='waiting',updated_at=now() where id=1;
+insert into public.round_state(id,round_number,status) values(1,0,'waiting') on conflict(id) do nothing;
+
+create or replace function public.execute_trade(
+ p_share_symbol text, p_quantity integer, p_share_price numeric,
+ p_seller_team_id uuid, p_buyer_team_id uuid
+) returns uuid language plpgsql security definer set search_path=public as $$
+declare v_round public.round_state%rowtype; v_share public.shares%rowtype;
+ v_buyer public.teams%rowtype; v_seller public.teams%rowtype;
+ v_total numeric(18,2); v_seller_qty numeric; v_id uuid; v_buyer_count integer; v_seller_count integer;
+begin
+ if p_quantity is null or p_quantity<=0 or p_share_price is null or p_share_price<=0 then raise exception 'Quantity and price must be positive'; end if;
+ if p_buyer_team_id=p_seller_team_id then raise exception 'Buyer and seller must be different teams'; end if;
+ select * into v_round from public.round_state where id=1 for update;
+ if v_round.status<>'active' then raise exception 'Trading is not open'; end if;
+ select * into v_share from public.shares where symbol=p_share_symbol for update;
+ if not found then raise exception 'Share not found'; end if;
+ perform 1 from public.teams where id in (p_buyer_team_id,p_seller_team_id) order by id for update;
+ select * into v_buyer from public.teams where id=p_buyer_team_id and archived=false;
+ select * into v_seller from public.teams where id=p_seller_team_id and archived=false;
+ if v_buyer.id is null or v_seller.id is null then raise exception 'Buyer or seller team not found/archived'; end if;
+ if v_round.round_number=0 and v_seller.name<>'Organizer Inventory' then raise exception 'Round 0 shares must be bought from the organizer'; end if;
+ if v_round.round_number>0 and (v_seller.name='Organizer Inventory' or v_buyer.name='Organizer Inventory') then raise exception 'Organizer sales are only allowed in Round 0'; end if;
+ if v_buyer.name='Organizer Inventory' then raise exception 'Organizer Inventory cannot buy shares'; end if;
+ if v_buyer.name<>'Organizer Inventory' then
+  select count(*) into v_buyer_count from public.transactions where round_number=v_round.round_number and (buyer_team_id=v_buyer.id or seller_team_id=v_buyer.id);
+  if v_buyer_count>=3 then raise exception '% has already used all 3 transactions this round',v_buyer.name; end if;
+ end if;
+ if v_seller.name<>'Organizer Inventory' then
+  select count(*) into v_seller_count from public.transactions where round_number=v_round.round_number and (buyer_team_id=v_seller.id or seller_team_id=v_seller.id);
+  if v_seller_count>=3 then raise exception '% has already used all 3 transactions this round',v_seller.name; end if;
+ end if;
+ v_total:=round(p_quantity*p_share_price,2);
+ if v_buyer.cash<v_total then raise exception 'Buyer has insufficient cash'; end if;
+ v_seller_qty:=coalesce((v_seller.holdings->>p_share_symbol)::numeric,0);
+ if v_seller_qty<p_quantity then raise exception 'Seller has insufficient shares'; end if;
+ update public.teams set cash=cash-v_total,holdings=jsonb_set(holdings,array[p_share_symbol],to_jsonb(coalesce((holdings->>p_share_symbol)::integer,0)+p_quantity),true) where id=p_buyer_team_id;
+ update public.teams set cash=cash+v_total,holdings=jsonb_set(holdings,array[p_share_symbol],to_jsonb(v_seller_qty-p_quantity),true) where id=p_seller_team_id;
+ update public.shares set previous_price=price,price=round(p_share_price,2),volume=volume+p_quantity,updated_at=now() where symbol=p_share_symbol;
+ insert into public.transactions(round_number,share_symbol,quantity,share_price,buyer_team_id,seller_team_id,buyer_name,seller_name,recorder_user_id,recorder_email)
+ values(v_round.round_number,p_share_symbol,p_quantity,round(p_share_price,2),p_buyer_team_id,p_seller_team_id,v_buyer.name,v_seller.name,auth.uid(),auth.jwt()->>'email') returning id into v_id;
+ return v_id;
+end $$;
+
+create or replace function public.start_round() returns integer language plpgsql security definer set search_path=public as $$
+declare r public.round_state%rowtype; n integer;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ select * into r from public.round_state where id=1 for update;
+ if r.status='active' then raise exception 'Close the current round before starting another'; end if;
+ if r.round_number>=3 and r.status='closed' then raise exception 'All rounds are complete'; end if;
+ if r.status='closed' then update public.round_state set round_number=round_number+1,status='active',updated_at=now() where id=1 returning round_number into r.round_number;
+ else update public.round_state set status='active',updated_at=now() where id=1; end if;
+ if r.round_number>0 then
+  insert into public.public_news(round_number,share_symbol,headline,body,published,published_at)
+  select e.round_number,e.share_symbol,e.headline,e.body,true,now() from public.news_events e
+  where e.round_number=r.round_number and not exists(select 1 from public.public_news p where p.round_number=e.round_number and p.share_symbol=e.share_symbol and p.headline=e.headline);
+ end if;
+ select count(*) into n from public.news_events where round_number=r.round_number;
+ return r.round_number;
+end $$;
+
+create or replace function public.close_round() returns integer language plpgsql security definer set search_path=public as $$
+declare r public.round_state%rowtype;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ select * into r from public.round_state where id=1 for update;
+ if r.status<>'active' then raise exception 'No active round to close'; end if;
+ update public.round_state set status='closed',updated_at=now() where id=1;
+ return r.round_number;
+end $$;
+grant execute on function public.execute_trade(text,integer,numeric,uuid,uuid) to anon,authenticated;
+grant execute on function public.start_round() to authenticated;
+grant execute on function public.close_round() to authenticated;
