@@ -341,3 +341,102 @@ revoke all on function public.start_round() from public, anon;
 revoke all on function public.close_round() from public, anon;
 grant execute on function public.start_round() to authenticated;
 grant execute on function public.close_round() to authenticated;
+
+
+-- ===== Five-round extension and capped close-round adjustments =====
+alter table public.round_state drop constraint if exists round_state_round_number_check;
+alter table public.round_state add constraint round_state_round_number_check check (round_number between 0 and 4);
+alter table public.transactions drop constraint if exists transactions_round_number_check;
+alter table public.transactions add constraint transactions_round_number_check check (round_number between 0 and 4);
+alter table public.news_events drop constraint if exists news_events_round_number_check;
+alter table public.news_events add constraint news_events_round_number_check check (round_number between 1 and 4);
+
+create table if not exists public.round_price_snapshots (
+  round_number integer not null check (round_number between 0 and 4),
+  share_symbol text not null references public.shares(symbol) on update cascade on delete cascade,
+  opening_price numeric(18,2) not null check (opening_price > 0),
+  created_at timestamptz not null default now(),
+  primary key (round_number, share_symbol)
+);
+alter table public.round_price_snapshots enable row level security;
+
+insert into public.news_events(round_number,share_symbol,headline,body,hidden_type,impact_pct) values
+(4,'RELIANCE','Reliance gains a major distribution partnership, though rollout will take time.','Investors must judge the long-term opportunity against near-term execution costs.','definitely_positive',8),
+(4,'TATAMOTORS','Tata Motors flags higher launch and warranty costs in its latest operating review.','The cost impact may be temporary, but margins need close monitoring.','definitely_negative',-8),
+(4,'AIRTEL','Bharti Airtel sees improving data usage while network investment remains elevated.','The update is constructive but does not guarantee immediate margin expansion.','somewhat_positive',0),
+(4,'HDFCBANK','HDFC Bank faces closer scrutiny of deposit pricing and near-term margin trends.','The market is weighing competitive pressure against the bank’s funding franchise.','somewhat_negative',0),
+(4,'ONGC','ONGC reports steadier output at a key asset as commodity prices remain volatile.','Operational progress is encouraging, though revenue still depends on market prices.','somewhat_positive',0)
+on conflict do nothing;
+
+create or replace function public.start_round() returns integer
+language plpgsql security definer set search_path=public as $$
+declare r public.round_state%rowtype;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ select * into r from public.round_state where id=1 for update;
+ if r.status='active' then raise exception 'Close the current round before starting another'; end if;
+ if r.round_number>=4 and r.status='closed' then raise exception 'All rounds are complete'; end if;
+ if r.status='closed' then
+   update public.round_state set round_number=round_number+1,status='active',updated_at=now()
+   where id=1 returning * into r;
+ else
+   update public.round_state set status='active',updated_at=now() where id=1 returning * into r;
+ end if;
+ insert into public.round_price_snapshots(round_number,share_symbol,opening_price)
+ select r.round_number,s.symbol,s.price from public.shares s
+ on conflict(round_number,share_symbol) do update set opening_price=excluded.opening_price,created_at=now();
+ if r.round_number>0 then
+   insert into public.public_news(round_number,share_symbol,headline,body,published,published_at)
+   select e.round_number,e.share_symbol,e.headline,e.body,true,now()
+   from public.news_events e
+   where e.round_number=r.round_number
+     and not exists(select 1 from public.public_news p where p.round_number=e.round_number and p.share_symbol=e.share_symbol and p.headline=e.headline);
+   update public.news_events set published=true where round_number=r.round_number;
+ end if;
+ return r.round_number;
+end $$;
+
+create or replace function public.close_round() returns integer
+language plpgsql security definer set search_path=public as $$
+declare r public.round_state%rowtype; e public.news_events%rowtype;
+        v_open numeric(18,2); v_current numeric(18,2); v_target numeric(18,2);
+        v_effect numeric; v_label text;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ select * into r from public.round_state where id=1 for update;
+ if r.status<>'active' then raise exception 'No active round to close'; end if;
+ if r.round_number between 1 and 4 then
+   for e in select * from public.news_events where round_number=r.round_number and published=true and resolved=false order by share_symbol for update
+   loop
+     select opening_price into v_open from public.round_price_snapshots where round_number=r.round_number and share_symbol=e.share_symbol;
+     select price into v_current from public.shares where symbol=e.share_symbol for update;
+     if v_open is null then v_open:=v_current; end if;
+     v_effect:=greatest(-6.0,least(6.0,e.impact_pct*0.75));
+     v_target:=round(v_current*(1+v_effect/100.0),2);
+     v_target:=greatest(round(v_open*0.92,2),least(round(v_open*1.08,2),v_target));
+     update public.shares set previous_price=price,price=v_target,updated_at=now() where symbol=e.share_symbol;
+     if e.hidden_type='definitely_positive' then v_label:='Positive outcome · dampened price adjustment';
+     elsif e.hidden_type='definitely_negative' then v_label:='Negative outcome · dampened price adjustment';
+     elsif e.hidden_type='somewhat_positive' then v_label:='Somewhat positive outcome · no direct news adjustment';
+     else v_label:='Somewhat negative outcome · no direct news adjustment'; end if;
+     update public.news_events set resolved=true where id=e.id;
+     update public.public_news set resolved=true,outcome_label=v_label
+       where round_number=e.round_number and share_symbol=e.share_symbol and headline=e.headline;
+   end loop;
+ end if;
+ update public.round_state set status='closed',updated_at=now() where id=1;
+ return r.round_number;
+end $$;
+
+create or replace function public.resolve_news_event(p_event_id uuid) returns void
+language plpgsql security definer set search_path=public as $$
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ raise exception 'News outcomes and capped price adjustments are applied automatically when the round closes.';
+end $$;
+
+revoke all on function public.start_round() from public, anon;
+revoke all on function public.close_round() from public, anon;
+grant execute on function public.start_round() to authenticated;
+grant execute on function public.close_round() to authenticated;
+grant execute on function public.resolve_news_event(uuid) to authenticated;
