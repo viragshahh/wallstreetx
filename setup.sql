@@ -518,3 +518,42 @@ revoke all on function public.admin_complete_reset() from public, anon;
 grant execute on function public.admin_delete_transaction(uuid) to authenticated;
 grant execute on function public.admin_reset_round() to authenticated;
 grant execute on function public.admin_complete_reset() to authenticated;
+
+-- Corrected reset implementation: net ledger reversals avoid temporary cash constraint failures.
+create or replace function public.admin_complete_reset()
+returns void language plpgsql security definer set search_path=public as $$
+declare x record; v_base numeric(18,2);
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ perform 1 from public.round_state where id=1 for update;
+ update public.teams tm set cash=tm.cash
+   + coalesce((select sum(t.total_value) from public.transactions t where t.buyer_team_id=tm.id),0)
+   - coalesce((select sum(t.total_value) from public.transactions t where t.seller_team_id=tm.id),0);
+ for x in
+   select team_id, share_symbol, sum(qty_delta)::integer as qty_delta
+   from (
+     select buyer_team_id as team_id, share_symbol, -quantity as qty_delta from public.transactions
+     union all
+     select seller_team_id as team_id, share_symbol, quantity as qty_delta from public.transactions
+   ) d group by team_id, share_symbol
+ loop
+   update public.teams set holdings=jsonb_set(holdings,array[x.share_symbol],
+     to_jsonb(greatest(0,coalesce((holdings->>x.share_symbol)::integer,0)+x.qty_delta)),true)
+   where id=x.team_id;
+ end loop;
+ delete from public.transactions;
+ for x in select symbol from public.shares loop
+   select opening_price into v_base from public.round_price_snapshots where round_number=0 and share_symbol=x.symbol;
+   if v_base is not null then
+     update public.shares set price=v_base,previous_price=v_base,volume=0,updated_at=now() where symbol=x.symbol;
+   else
+     update public.shares set previous_price=price,volume=0,updated_at=now() where symbol=x.symbol;
+   end if;
+ end loop;
+ update public.news_events set published=false,resolved=false,public_news_id=null;
+ delete from public.public_news;
+ delete from public.round_price_snapshots;
+ update public.round_state set round_number=0,status='waiting',updated_at=now() where id=1;
+end $$;
+revoke all on function public.admin_complete_reset() from public, anon;
+grant execute on function public.admin_complete_reset() to authenticated;
