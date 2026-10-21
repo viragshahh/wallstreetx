@@ -337,5 +337,7 @@ begin
  return r.round_number;
 end $$;
 grant execute on function public.execute_trade(text,integer,numeric,uuid,uuid) to anon,authenticated;
+revoke all on function public.start_round() from public, anon;
+revoke all on function public.close_round() from public, anon;
 grant execute on function public.start_round() to authenticated;
 grant execute on function public.close_round() to authenticated;
