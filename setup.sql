@@ -39,7 +39,7 @@ create table if not exists public.teams (
 );
 create table if not exists public.round_state (
   id integer primary key default 1 check(id=1),
-  round_number integer not null default 1 check(round_number between 1 and 3),
+  round_number integer not null default 1 check(round_number between 0 and 4),
   status text not null default 'waiting' check(status in ('waiting','active','closed')),
   updated_at timestamptz not null default now()
 );
@@ -47,7 +47,7 @@ insert into public.round_state(id,round_number,status) values(1,1,'waiting') on 
 
 create table if not exists public.transactions (
   id uuid primary key default gen_random_uuid(),
-  round_number integer not null check(round_number between 1 and 3),
+  round_number integer not null check(round_number between 0 and 4),
   share_symbol text not null references public.shares(symbol),
   quantity integer not null check(quantity>0),
   share_price numeric(14,2) not null check(share_price>0),
