@@ -557,3 +557,130 @@ begin
 end $$;
 revoke all on function public.admin_complete_reset() from public, anon;
 grant execute on function public.admin_complete_reset() to authenticated;
+
+
+-- ===== Ledger reconciliation and exact reset baselines (2026-10) =====
+alter table public.teams add column if not exists starting_cash numeric(18,2);
+alter table public.teams add column if not exists starting_holdings jsonb;
+update public.teams set starting_cash=coalesce(starting_cash,cash), starting_holdings=coalesce(starting_holdings,holdings)
+where starting_cash is null or starting_holdings is null;
+alter table public.teams alter column starting_cash set default 1000000;
+alter table public.teams alter column starting_cash set not null;
+alter table public.teams alter column starting_holdings set default '{}'::jsonb;
+alter table public.teams alter column starting_holdings set not null;
+
+alter table public.shares add column if not exists starting_price numeric(14,2);
+update public.shares set starting_price=case symbol
+ when 'RELIANCE' then 1400.00 when 'TATAMOTORS' then 700.00
+ when 'AIRTEL' then 1200.00 when 'HDFCBANK' then 1700.00 when 'ONGC' then 250.00
+ else price end where starting_price is null;
+alter table public.shares alter column starting_price set not null;
+
+create or replace function public.capture_team_starting_state()
+returns trigger language plpgsql set search_path=public as $$
+begin
+ new.starting_cash:=new.cash;
+ new.starting_holdings:=new.holdings;
+ return new;
+end $$;
+drop trigger if exists teams_capture_starting_state on public.teams;
+create trigger teams_capture_starting_state before insert on public.teams
+for each row execute function public.capture_team_starting_state();
+
+create or replace function public.capture_share_starting_price()
+returns trigger language plpgsql set search_path=public as $$
+begin
+ if new.starting_price is null then new.starting_price:=new.price; end if;
+ return new;
+end $$;
+drop trigger if exists shares_capture_starting_price on public.shares;
+create trigger shares_capture_starting_price before insert on public.shares
+for each row execute function public.capture_share_starting_price();
+
+create or replace function public.rebuild_team_ledgers()
+returns void language plpgsql security definer set search_path=public as $$
+begin
+ update public.teams tm
+ set cash=tm.starting_cash
+   - coalesce((select sum(t.total_value) from public.transactions t where t.buyer_team_id=tm.id),0)
+   + coalesce((select sum(t.total_value) from public.transactions t where t.seller_team_id=tm.id),0),
+ holdings=coalesce((
+   select jsonb_object_agg(vals.sym,vals.qty)
+   from (
+     select keys.sym,
+       greatest(0,coalesce((tm.starting_holdings->>keys.sym)::integer,0)+coalesce(flows.net_qty,0))::integer as qty
+     from (
+       select jsonb_object_keys(tm.starting_holdings) as sym
+       union
+       select distinct share_symbol from public.transactions where buyer_team_id=tm.id or seller_team_id=tm.id
+     ) keys
+     left join (
+       select share_symbol,sum(qty_delta)::integer as net_qty
+       from (
+         select share_symbol,quantity as qty_delta from public.transactions where buyer_team_id=tm.id
+         union all
+         select share_symbol,-quantity as qty_delta from public.transactions where seller_team_id=tm.id
+       ) f group by share_symbol
+     ) flows on flows.share_symbol=keys.sym
+   ) vals
+ ),'{}'::jsonb)
+ where true;
+end $$;
+
+create or replace function public.admin_delete_transaction(p_transaction_id uuid)
+returns void language plpgsql security definer set search_path=public as $$
+declare t public.transactions%rowtype;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ select * into t from public.transactions where id=p_transaction_id for update;
+ if not found then raise exception 'Transaction not found'; end if;
+ delete from public.transactions where id=p_transaction_id;
+ perform public.rebuild_team_ledgers();
+ update public.shares s set
+   volume=coalesce((select sum(tx.quantity) from public.transactions tx where tx.share_symbol=s.symbol),0),
+   updated_at=now()
+ where true;
+end $$;
+
+create or replace function public.admin_reset_round()
+returns integer language plpgsql security definer set search_path=public as $$
+declare r public.round_state%rowtype;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ select * into r from public.round_state where id=1 for update;
+ if r.round_number not between 0 and 4 then raise exception 'Invalid current round'; end if;
+ delete from public.transactions where round_number=r.round_number;
+ perform public.rebuild_team_ledgers();
+ update public.shares s set
+   volume=coalesce((select sum(tx.quantity) from public.transactions tx where tx.share_symbol=s.symbol),0),
+   updated_at=now()
+ where true;
+ update public.shares s set price=sn.opening_price,previous_price=sn.opening_price,updated_at=now()
+ from public.round_price_snapshots sn where sn.round_number=r.round_number and sn.share_symbol=s.symbol;
+ update public.news_events set resolved=false where round_number=r.round_number;
+ update public.public_news set resolved=false,outcome_label=null where round_number=r.round_number;
+ update public.round_state set status='active',updated_at=now() where id=1;
+ return r.round_number;
+end $$;
+
+create or replace function public.admin_complete_reset()
+returns void language plpgsql security definer set search_path=public as $$
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ perform 1 from public.round_state where id=1 for update;
+ delete from public.transactions where true;
+ update public.teams set cash=starting_cash,holdings=starting_holdings where true;
+ update public.shares set price=starting_price,previous_price=starting_price,volume=0,updated_at=now() where true;
+ update public.news_events set published=false,resolved=false,public_news_id=null where true;
+ delete from public.public_news where true;
+ delete from public.round_price_snapshots where true;
+ update public.round_state set round_number=0,status='waiting',updated_at=now() where id=1;
+end $$;
+
+revoke all on function public.rebuild_team_ledgers() from public,anon,authenticated;
+revoke all on function public.admin_delete_transaction(uuid) from public,anon;
+revoke all on function public.admin_reset_round() from public,anon;
+revoke all on function public.admin_complete_reset() from public,anon;
+grant execute on function public.admin_delete_transaction(uuid) to authenticated;
+grant execute on function public.admin_reset_round() to authenticated;
+grant execute on function public.admin_complete_reset() to authenticated;
