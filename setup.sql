@@ -440,3 +440,81 @@ revoke all on function public.close_round() from public, anon;
 grant execute on function public.start_round() to authenticated;
 grant execute on function public.close_round() to authenticated;
 grant execute on function public.resolve_news_event(uuid) to authenticated;
+
+
+-- ===== Admin reset controls and transaction deletion =====
+create or replace function public.admin_delete_transaction(p_transaction_id uuid)
+returns void language plpgsql security definer set search_path=public as $$
+declare t public.transactions%rowtype; v_buyer public.teams%rowtype; v_seller public.teams%rowtype;
+        v_buyer_qty integer; v_seller_qty integer;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ select * into t from public.transactions where id=p_transaction_id for update;
+ if not found then raise exception 'Transaction not found'; end if;
+ select * into v_buyer from public.teams where id=t.buyer_team_id for update;
+ select * into v_seller from public.teams where id=t.seller_team_id for update;
+ if v_buyer.id is null or v_seller.id is null then raise exception 'Cannot reverse: buyer or seller team no longer exists'; end if;
+ v_buyer_qty:=coalesce((v_buyer.holdings->>t.share_symbol)::integer,0);
+ v_seller_qty:=coalesce((v_seller.holdings->>t.share_symbol)::integer,0);
+ if v_buyer_qty<t.quantity then raise exception 'Cannot delete: buyer no longer holds enough of this share to reverse the transaction'; end if;
+ update public.teams set cash=cash+t.total_value,
+   holdings=jsonb_set(holdings,array[t.share_symbol],to_jsonb(v_buyer_qty-t.quantity),true) where id=t.buyer_team_id;
+ update public.teams set cash=cash-t.total_value,
+   holdings=jsonb_set(holdings,array[t.share_symbol],to_jsonb(v_seller_qty+t.quantity),true) where id=t.seller_team_id;
+ update public.shares set volume=greatest(0,volume-t.quantity),updated_at=now() where symbol=t.share_symbol;
+ delete from public.transactions where id=p_transaction_id;
+end $$;
+
+create or replace function public.admin_reset_round()
+returns integer language plpgsql security definer set search_path=public as $$
+declare r public.round_state%rowtype; t public.transactions%rowtype;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ select * into r from public.round_state where id=1 for update;
+ for t in select * from public.transactions where round_number=r.round_number order by created_at desc for update
+ loop
+   update public.teams set cash=cash+t.total_value,
+     holdings=jsonb_set(holdings,array[t.share_symbol],to_jsonb(greatest(0,coalesce((holdings->>t.share_symbol)::integer,0)-t.quantity)),true) where id=t.buyer_team_id;
+   update public.teams set cash=cash-t.total_value,
+     holdings=jsonb_set(holdings,array[t.share_symbol],to_jsonb(coalesce((holdings->>t.share_symbol)::integer,0)+t.quantity),true) where id=t.seller_team_id;
+   update public.shares set volume=greatest(0,volume-t.quantity) where symbol=t.share_symbol;
+ end loop;
+ delete from public.transactions where round_number=r.round_number;
+ update public.shares s set price=sn.opening_price,previous_price=sn.opening_price,updated_at=now()
+ from public.round_price_snapshots sn where sn.round_number=r.round_number and sn.share_symbol=s.symbol;
+ update public.news_events set resolved=false where round_number=r.round_number;
+ update public.public_news set resolved=false,outcome_label=null where round_number=r.round_number;
+ update public.round_state set status='active',updated_at=now() where id=1;
+ return r.round_number;
+end $$;
+
+create or replace function public.admin_complete_reset()
+returns void language plpgsql security definer set search_path=public as $$
+declare t public.transactions%rowtype;
+begin
+ if not public.has_app_role('admin') then raise exception 'Admin access required'; end if;
+ perform 1 from public.round_state where id=1 for update;
+ for t in select * from public.transactions order by created_at desc for update
+ loop
+   update public.teams set cash=cash+t.total_value,
+     holdings=jsonb_set(holdings,array[t.share_symbol],to_jsonb(greatest(0,coalesce((holdings->>t.share_symbol)::integer,0)-t.quantity)),true) where id=t.buyer_team_id;
+   update public.teams set cash=cash-t.total_value,
+     holdings=jsonb_set(holdings,array[t.share_symbol],to_jsonb(coalesce((holdings->>t.share_symbol)::integer,0)+t.quantity),true) where id=t.seller_team_id;
+ end loop;
+ delete from public.transactions;
+ update public.shares s set
+   price=coalesce((select sn.opening_price from public.round_price_snapshots sn where sn.round_number=0 and sn.share_symbol=s.symbol),s.price),
+   previous_price=coalesce((select sn.opening_price from public.round_price_snapshots sn where sn.round_number=0 and sn.share_symbol=s.symbol),s.price),
+   volume=0,updated_at=now();
+ delete from public.round_price_snapshots;
+ update public.news_events set published=false,resolved=false,public_news_id=null;
+ delete from public.public_news;
+ update public.round_state set round_number=0,status='waiting',updated_at=now() where id=1;
+end $$;
+
+revoke all on function public.admin_delete_transaction(uuid) from public, anon;
+revoke all on function public.admin_reset_round() from public, anon;
+revoke all on function public.admin_complete_reset() from public, anon;
+grant execute on function public.admin_delete_transaction(uuid) to authenticated;
+grant execute on function public.admin_reset_round() to authenticated;
+grant execute on function public.admin_complete_reset() to authenticated;
