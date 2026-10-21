@@ -63,7 +63,7 @@ create table if not exists public.transactions (
 );
 create table if not exists public.public_news (
   id uuid primary key default gen_random_uuid(),
-  round_number integer not null check(round_number between 1 and 3),
+  round_number integer not null check(round_number between 1 and 4),
   share_symbol text not null references public.shares(symbol),
   headline text not null,
   body text not null default '',
@@ -75,7 +75,7 @@ create table if not exists public.public_news (
 create table if not exists public.news_events (
   id uuid primary key default gen_random_uuid(),
   public_news_id uuid unique references public.public_news(id) on delete set null,
-  round_number integer not null check(round_number between 1 and 3),
+  round_number integer not null check(round_number between 1 and 4),
   share_symbol text not null references public.shares(symbol),
   headline text not null,
   body text not null default '',
