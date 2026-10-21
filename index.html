@@ -43,7 +43,7 @@
 <div class="modal" id="loginModal"><div class="modalbox"><div class="toolbar" style="justify-content:space-between"><h3>Organizer sign in</h3><button class="secondary" onclick="closeLogin()">✕</button></div><p class="hint">Use the email/password account created in Supabase and assigned a recorder or admin role.</p><form id="loginForm"><div class="field"><label>Email</label><input id="loginEmail" type="email" required autocomplete="username"></div><div class="field"><label>Password</label><input id="loginPassword" type="password" required autocomplete="current-password"></div><button class="wide">Sign in</button><div id="loginError" class="notice error hidden"></div></form></div></div>
 <div class="toast" id="toast"></div>
 <script>
-const CONFIG={url:'PASTE_SUPABASE_PROJECT_URL_HERE',anonKey:'PASTE_SUPABASE_PUBLISHABLE_OR_ANON_KEY_HERE'};
+const CONFIG={url:'https://ikhjdipagzgfcdpgczmh.supabase.co',anonKey:'sb_publishable_cJRjCWsg67muUmyUNsgHdQ_-S-OXl-f'};
 let db=null,session=null,role=null,shares=[],teams=[],transactions=[],publicNews=[],hiddenNews=[],roundInfo={round_number:1,status:'waiting'},channel=null,activeView='dashboard';
 const $=id=>document.getElementById(id);
 const money=n=>'₹'+Number(n||0).toLocaleString('en-IN',{minimumFractionDigits:2,maximumFractionDigits:2});
